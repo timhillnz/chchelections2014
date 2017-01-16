@@ -23,37 +23,34 @@ library(geosphere)
 ```
 
 ```{r, cache = T}
-## Load electoral boundary
-
+## Load electoral boundary data
 electorates <- readOGR("/Users/Tim/Dropbox/R_files/data/kx-general-electoral-district-boundaries-2014-SHP", layer = "general-electoral-district-boundaries-2014")
 
+##Subset the electoral boundary data to only those in the Christchurch area
 chchlist <- c("Waimakariri","Selwyn","Ilam","Christchurch Central","Wigram","Port Hills", "Christchurch East")
-
 chchelectorates <- electorates[electorates$name %in% chchlist,]
 
+##Convert electorate boundary data to suitable datum
 chchelectorates <- spTransform(chchelectorates, CRS("+proj=longlat +datum=WGS84 +no_defs"))
 
 rm(chchlist,electorates)
+plot(chchelectorates)
 
 ```
 
 ```{r, cache = T}
 # Find the 2013 meshblocks for the chosen electorates
-## First, load full NZ meshblock data
-
+##First, load full NZ meshblock data
 fullmeshblocks <- readOGR("/Users/Tim/Dropbox/R_files/data/2013censusmeshblocks", layer = "MB2013_GV_Full")
 
-## use projection from stackoverflow.com/questions/33045388/projecting-my-shapefile-data-on-leaflet-map-using-r
+##use projection from stackoverflow.com/questions/33045388/projecting-my-shapefile-data-on-leaflet-map-using-r
 fullmeshblocks <- spTransform(fullmeshblocks, CRS("+proj=longlat +datum=WGS84 +no_defs"))
-
-## Subset to only those meshblocks in the Canterbury region - this will reduce the processing time for some of the later analysis
-#cantymeshblocks <- fullmeshblocks[(fullmeshblocks$REGC2013_N == "Canterbury Region"),]
 
 ```
 
 ```{r}
 
-##create matrix of meshblocks contained in electorates
+##Use raster package to select only those meshblocks in the Christchurch electorates
 cantymeshblocks <- raster::intersect(chchelectorates, fullmeshblocks)
 rm(fullmeshblocks)
 plot(cantymeshblocks)
@@ -63,6 +60,7 @@ plot(cantymeshblocks)
 ```{r}
 # get voting place data
 votes <- GE2014
+locations <- Locations2014
 
 ##
 electorates2 <- c("Christchurch Central 4", "Christchurch East 5","Ilam 18","Port Hills 41","Waimakariri 57","Selwyn 48", "Wigram 64")
@@ -95,37 +93,41 @@ votes <- votes %>% filter((Electorate %in% electorates2) & VotingType == "Party"
   ungroup() %>%
   select(1:2,8:22) %>%
   #na.omit() %>%
-  distinct() %>% left_join(Locations2014, by = "VotingPlace")
+  distinct() %>% left_join(locations, by = "VotingPlace")
 
+##Convert votes df to spatialPolygons data type
+votes <- as.data.frame(na.omit(votes))
+coordinates(votes) <- ~WGS84Longitude+WGS84Latitude
+proj4string(votes) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
 
+rm(electorates2)
 
-
-
-```
-
-
-
-
-
-```{r}
-
-# Get election results for the voting places in the Christchurch central electorate
-
-locations <- Locations2014 %>% filter(ElectorateNumber == 4) %>% droplevels()
-results <- GE2014 %>% filter(VotingPlace %in% as.vector(locations$VotingPlace)) %>% droplevels()
-
-locations <- Locations2014 %>% filter(ElectorateNumber == 4)
-
+plot(votes)
 
 ```
+
+
+
 
 ```{r meshblockCentroids}
+
+##Find centroid of each meshblock
 meshcentroids <- gCentroid(cantymeshblocks, byid = T)
 plot(meshcentroids)
-votes <- as.data.frame(na.omit(votes))
-#coordinates(votes) <- ~WGS84Longitude+WGS84Latitude
-#proj4string(votes) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
-distance <- distm
+
+##Calculate distance matrix for meshblocks and voting places
+distance <- distm(meshcentroids, votes)
+  
+closest <- vector()
+  
+for(i in 1:nrow(distance)) {
+  closest[i] <- votes$VotingPlaceID[base::which.min(distance[i,])]
+}
+
+cantymeshblocks$VotingPlaceID <- closest
+
+##Join data
+cantymeshblocks@data <- merge(cantymeshblocks@data, votes@data, by = "VotingPlaceID", all.x = T)
 
 ```
 
@@ -137,22 +139,25 @@ distance <- distm
 chchloc <- geocode("Christchurch, NZ")
 
 m1placepopup <- paste0("<b>Address: </b>",votes$VotingPlace,"<br>",
-                       "<b>Electorate: </b>", votes$ElectorateName)
+                       "<b>Electorate: </b>", votes$ElectorateName, "<br>",
+                       "<b>Location Code: </b>", votes$VotingPlaceID)
 
-m1meshpopup <- paste0("<b>Meshblock code: </b>",check$MB2013,"<br>",
-                      "<b>Area: </b>",check$AU2013_NAM)
+m1meshpopup <- paste0("<b>Meshblock code: </b>",cantymeshblocks$MB2013,"<br>",
+                      "<b>Area: </b>",cantymeshblocks$AU2013_NAM,"<br>",
+                      "<b>Voting Location: </b>",cantymeshblocks$VotingPlace)
+
+pal1 <- colorNumeric(palette = "Blues", domain = cantymeshblocks$propNat)
 
 
 m1 <- leaflet() %>% setView(lat = chchloc[2], lng = chchloc[1], zoom = 10) %>% 
   addTiles() %>%
-  addProviderTiles("CartoDB.Positron") %>%
+  addProviderTiles("OpenStreetMap.HOT") %>%
   addPolygons(data = chchelectorates, fillOpacity = 0, color = "blue", weight = 3) %>% 
-  addPolygons(data = check, fillOpacity = 0, color = "blue", weight = 1, popup = m1meshpopup) %>%
-  addMarkers(data = na.omit(votes), lng = ~WGS84Longitude, lat = ~WGS84Latitude, 
-             clusterOptions = markerClusterOptions(),
+  addPolygons(data = cantymeshblocks, stroke = TRUE, color = "blue", weight = 0.5, opacity = 1, 
+              fillColor = ~pal1(propNat), fillOpacity = 0.5, popup = m1meshpopup) %>%
+  addMarkers(data = na.omit(votes), 
+            clusterOptions = markerClusterOptions(), 
              popup = m1placepopup)
- # addWebGLHeatmap(data = na.omit(votes), lng = ~WGS84Longitude, lat = ~WGS84Latitude, intensity = ~propNat, size=5000)
-
 
 m1
 ```
