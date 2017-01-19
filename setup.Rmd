@@ -2,10 +2,12 @@
 title: "Analysis of voting place data in Canterbury for the 2014 general elections"
 author: "Tim Hill"
 date: "8 December 2016"
-output: html_document
+output: 
+  html_document:
+   keep_md: true
 ---
 
-```{r}
+```{r message  = F}
 
 library(nzelect)
 library(leaflet)
@@ -16,14 +18,21 @@ library(raster)
 library(dplyr)
 library(ggplot2)
 library(geosphere)
+library(ggmap)
 library(sp)
 
 ```
 
+This script prepares the required data for analysing the 2014 NZ election data together with the 2013 NZ meshblock level census data.  This analysis matches the census data with the results from the closest voting place, however there are a number of issues with this model.
 
+* A high proportion of votes are made before election day and aren't counted towards any one voting place (this can be looked at further)
+* Many people won't vote at the voting place closest to their home.
 
+Although there are a few plots and a leaflet map in this script, most analysis will be done in a later script.
+
+### Load census meshblock data
 ```{r, cache = T}
-# Find the 2013 meshblocks for the chosen electorates
+# Find the 2013 census meshblocks for the chosen electorates
 ##First, load full NZ meshblock data then subset to only those in the Canterbury region, and also drop the oceanic blocks
 fullmeshblocks <- readOGR("/Users/Tim/Dropbox/R_files/data/2013censusmeshblocks", layer = "MB2013_GV_Full")
 
@@ -31,7 +40,7 @@ fullmeshblocks <- readOGR("/Users/Tim/Dropbox/R_files/data/2013censusmeshblocks"
 cantymeshblocks <- fullmeshblocks[fullmeshblocks@data$REGC2013_N == "Canterbury Region" & 
                                     fullmeshblocks$LAND2013_N != "Oceanic",]
 
-##use projection from stackoverflow.com/questions/33045388/projecting-my-shapefile-data-on-leaflet-map-using-r
+##need a different projection/datum to show the spatial data in a leaflet map
 cantymeshblocks <- spTransform(cantymeshblocks, CRS("+proj=longlat +datum=WGS84 +no_defs"))
 
 plot(cantymeshblocks)
@@ -39,23 +48,16 @@ plot(cantymeshblocks)
 
 ```
 
-
+### Prepare party vote and voting place data
 ```{r}
-# get voting place data
-votesfull <- GE2014
+# get voting place data, fortunately much of the prep work for this has been done by github.com/ellisp/nzelect
 
+votesfull <- GE2014
 locations <- Locations2014
 
-##
 
-#votingplaces <- votes %>% select(VotingPlace) %>% distinct() %>% droplevels()
-
-#votes <- votes %>% filter((Electorate %in% electorates2) & VotingType == "Party")
-
-#parties <- votes %>% select(Party) %>% distinct() %>% .[,1]
-#print(parties)
-
-
+## convert votes made to proportions of total votes for each of the parties and merge with the voting place data.
+## Only party votes under NZ's MMP electoral system will be used. 
 votes <- votesfull %>% filter(VotingType == "Party") %>%
   group_by(VotingPlace) %>%
   mutate(propNat = sum(Votes[Party == "National Party"]) / sum(Votes), 
@@ -75,7 +77,6 @@ votes <- votesfull %>% filter(VotingType == "Party") %>%
          propInformalVotes = sum(Votes[Party == "Informal Party Votes"]) / sum(Votes)) %>%
   ungroup() %>%
   select(1:2,8:22) %>%
-  #na.omit() %>%
   distinct() %>% left_join(locations, by = "VotingPlace") %>% filter(REGC2014_N == "Canterbury Region")
 
 ##Convert votes df to spatialPolygons data type
@@ -88,7 +89,7 @@ plot(votes)
 ```
 
 
-
+### Match meshblocks with voting places
 
 ```{r meshblockCentroids}
 
@@ -98,18 +99,14 @@ plot(meshcentroids)
 
 ##Calculate distance matrix for meshblock centroids and voting places
 distance <- distm(meshcentroids, votes)
-colnames(distance) <- votes$VotingPlaceID
-rownames(distance) <- rownames(meshcentroids@coords)
+cantymeshblocks$VotingPlaceID <- votes$VotingPlaceID[apply(distance, 1, which.min)]
 
-min.vec <- apply(distance, 1, which.min)
-cantymeshblocks$VotingPlaceID <- votes$VotingPlaceID[min.vec]
-
-  
-#cantymeshblocks$VotingPlaceID <- apply(distance, 1, function(x) votes$VotingPlaceID[base::which.min(distance[x])])
-
-##Join data
+##Join data.
+##Using merge seems to mess up the order of the rows in the data slot and they no longer match the correct polygons.  Not sure why - but manually arranging them and adding back the row names seems to fix this.
 name.vec <- row.names(cantymeshblocks@data)
+
 cantymeshblocks@data <- merge(cantymeshblocks@data, votes@data, by = "VotingPlaceID", all.x = T)
+
 cantymeshblocks@data <- arrange(cantymeshblocks@data, OBJECTID)
 rownames(cantymeshblocks@data) <- name.vec
 
@@ -117,6 +114,9 @@ rownames(cantymeshblocks@data) <- name.vec
 
 
 
+### Create a leaflet map based on the data
+
+This map shows the proportion of Green Party votes for each meshblock.
 
 ```{r}
 
@@ -130,15 +130,15 @@ m1meshpopup <- paste0("<b>Meshblock code: </b>",cantymeshblocks$MB2013,"<br>",
                       "<b>Area: </b>",cantymeshblocks$AU2013_NAM,"<br>",
                       "<b>Voting Location: </b>",cantymeshblocks$VotingPlace)
 
-pal1 <- colorNumeric(palette = "Blues", domain = cantymeshblocks$propNat)
+pal1 <- colorNumeric(palette = "Greens", domain = cantymeshblocks$propGrn)
 
 
 m1 <- leaflet() %>% setView(lat = chchloc[2], lng = chchloc[1], zoom = 10) %>% 
   addTiles() %>%
   addProviderTiles("OpenStreetMap.HOT") %>%
   addPolygons(data = cantymeshblocks, stroke = TRUE, color = "blue", weight = 0.5, opacity = 1, 
-             fillColor = ~pal1(propNat), 
-             fillOpacity = 0.5, 
+             fillColor = ~pal1(propGrn), 
+             fillOpacity = 0.8, 
              popup = m1meshpopup) %>%
   addMarkers(data = na.omit(votes), 
             clusterOptions = markerClusterOptions(), 
